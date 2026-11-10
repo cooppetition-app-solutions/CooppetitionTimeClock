@@ -104,8 +104,10 @@ export async function addCostCode(_: ActionState, fd: FormData): Promise<ActionS
 
 // ── People ────────────────────────────────────────────────────────────────
 
+// PINs may be stored hashed, so check by lookup rather than comparing values.
 async function pinTaken(companyId: string, pin: string, exceptId?: string) {
-  return (await repo().listUsers(companyId)).some((u) => u.kioskPin === pin && u.id !== exceptId);
+  const holder = await repo().findUserByPin(companyId, pin);
+  return Boolean(holder && holder.id !== exceptId);
 }
 
 export async function addPerson(_: ActionState, fd: FormData): Promise<ActionState> {
