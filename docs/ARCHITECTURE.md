@@ -17,8 +17,8 @@ scaffolded, and the steps to connect each service.
 | Offline queue (per-site setting) | **Built.** IndexedDB on device, idempotent sync. |
 | Continuous GPS (per-job setting) | **Built** while the app is open. Background tracking needs a native app (see below). |
 | CSV payroll export | **Built.** Works with any payroll service. |
-| Database schema, RLS, storage, realtime | **Written and tested** on Postgres 16. Not attached to a Supabase project. |
-| Supabase data adapter (`SupabaseRepository`) | **Stub.** Every method throws `NotConnectedError` with the query it needs. |
+| Database schema, RLS, storage, realtime | **Live** in Supabase project `cooppetition-portfolio-tracking` (us-east-1), in its own `timeclock` schema. Tested on Postgres 16 first. |
+| Supabase data adapter (`SupabaseRepository`) | **Built and live.** Production runs with `DATA_BACKEND=supabase`; `memory` is still available for local work. |
 | Sign-in (Supabase Auth) | **Stub.** Hosted demo: one admin email + password (`ACCESS_EMAIL` / `ACCESS_PASSWORD`) guards the whole site, then you pick a sample person on `/login`. |
 | QuickBooks, Wagepoint, Dayforce, ADP | **Scaffolded.** Interface, env var names and a payload preview. No network calls. |
 | SMS, email, push | **Scaffolded.** Deliveries are logged as `not_connected`. |
@@ -40,7 +40,7 @@ scaffolded, and the steps to connect each service.
 │   Domain          src/lib/domain/*     pure logic: hours, OT, geofence │
 │   Data layer      src/lib/data/*       Repository interface            │
 │                     ├─ MemoryRepository   (demo, active)               │
-│                     └─ SupabaseRepository (stub) ────────┐             │
+│                     └─ SupabaseRepository (live) ────────┐             │
 │   Integrations    src/lib/integrations/*                 │             │
 │                     ├─ payroll/   csv ✔ qbo wagepoint dayforce adp     │
 │                     └─ messaging/ in-app ✔ sms email push              │
@@ -220,44 +220,62 @@ Vercel plan, which is why the file isn't committed yet:
 }
 ```
 
-## Connecting Supabase (step by step)
+## Database connection (how it works today)
 
-1. Create a Supabase project in **ca-central-1 (Canada Central)**.
-2. Install the CLI, then run `supabase link --project-ref <ref>` followed by
-   `supabase db push`. This applies `supabase/migrations/` in order.
-3. Test RLS against the project: run `psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/rls.test.sql`.
-   It runs inside a transaction and rolls back.
-4. In Auth settings, enable phone sign-in (an SMS provider, such as Twilio)
+```
+Next.js server ──HTTPS──▶ Edge Function `timeclock-db` ──▶ Postgres, schema `timeclock`
+ (Vercel)      x-timeclock-key      (Supabase)         runs as role `timeclock_app`
+```
+
+- **Why an Edge Function:** Vercel can't reach Supabase's direct Postgres host
+  (IPv6 only), and this keeps database credentials out of Vercel entirely. The
+  function uses the `SUPABASE_DB_URL` that Supabase injects.
+- **Shared project:** the app lives in the `timeclock` schema of the
+  `cooppetition-portfolio-tracking` project, next to that project's own tables.
+  `timeclock_app` can reach the `timeclock` schema and nothing else, which is
+  checked in `supabase/tests/rls.test.sql`. Data is in us-east-1, not Canada;
+  moving to a dedicated ca-central-1 project later is a `supabase db push`
+  plus a data copy.
+- **Keys:** Vercel holds `TIMECLOCK_DB_KEY`. The database stores only its
+  SHA-256 in `timeclock_private.server_keys`, a schema with no API grants. To
+  rotate it, insert a new hash, set the new key in Vercel, redeploy, then set
+  `revoked_at` on the old row.
+- **App settings:** `DATA_BACKEND=supabase`, `TIMECLOCK_DB_URL` (the function's
+  URL) and `TIMECLOCK_DB_KEY`.
+- **Kiosk PINs:** stored as bcrypt hashes and never read back, so the
+  sign-in picker no longer shows them. Demo PINs are in the README.
+- **Sample data:** `npx tsx scripts/seed-demo-sql.ts` prints SQL for the
+  two demo companies, with dates relative to today. Running it again is a
+  no-op.
+
+## Moving to real sign-in (Supabase Auth)
+
+1. In Auth settings, enable phone sign-in (an SMS provider such as Twilio)
    and email magic links.
-5. Add the variables from `.env.example` to Vercel (Production and
-   Preview).
-6. Run `npm i @supabase/supabase-js @supabase/ssr`, then implement
-   `src/lib/data/supabase/supabase-repository.ts`. Each stub names its
-   query. Run user requests with the signed-in user's client so RLS applies.
-   Use the service role only in background jobs and for kiosk punches,
-   after the device token has been verified.
-7. Replace `getSession()` in `src/lib/auth/session.ts` with
-   `supabase.auth.getUser()` and a membership lookup.
-8. Set `DATA_BACKEND=supabase`.
-9. Optional: swap `AutoRefresh` for Realtime subscriptions on `punches` and
+2. Expose the `timeclock` schema to the API (Settings → API → Exposed schemas).
+3. `npm i @supabase/supabase-js @supabase/ssr`. Replace `getSession()` in
+   `src/lib/auth/session.ts` with `supabase.auth.getUser()` plus a membership
+   lookup, and link `profiles.auth_user_id`.
+4. Run user requests through the signed-in user's client, so the RLS policies
+   in `…_rls_policies.sql` apply per person. Keep the Edge Function for
+   background jobs and kiosk punches.
+5. Remove the demo gate: `src/lib/auth/access-gate.ts`, the gate in
+   `src/middleware.ts` and `src/app/access/`.
+6. Optional: swap `AutoRefresh` for Realtime subscriptions on `punches` and
    `message_deliveries`.
 
 ## Hosted demo environment
 
 Vercel project `cooppetition-timeclock` (team "Jeff's Projects") deploys
-`main` automatically. Until Supabase is connected:
+`main` automatically.
 
 - `src/middleware.ts` sends every request to `/access` until the visitor
   enters `ACCESS_EMAIL` and `ACCESS_PASSWORD` (Vercel env vars). The
   deployed site refuses to serve if either is missing. Cron and webhook
   routes skip the gate because they carry their own auth.
-- Data lives in server memory and resets when Vercel recycles the
-  instance. Treat it as a walkthrough, not a system of record.
+- Data is saved in Supabase, so changes persist across visits and devices.
 - To rotate the password, change `ACCESS_PASSWORD` in Vercel and redeploy.
   Everyone is signed out.
-
-When Supabase Auth goes live, delete `src/lib/auth/access-gate.ts`, the
-gate in `src/middleware.ts` and `src/app/access/`.
 
 ## Testing
 
@@ -266,4 +284,4 @@ gate in `src/middleware.ts` and `src/app/access/`.
 | `npm test` | hours, overtime (Ontario, BC), breaks, geofence, DST, pay periods, role matrix |
 | `npm run typecheck` | TypeScript |
 | `npm run build` | production build |
-| `supabase/tests/rls.test.sql` | tenant isolation, role limits, immutable punches, no double-booking |
+| `supabase/tests/rls.test.sql` | tenant isolation, role limits, message visibility, immutable punches, no double-booking, server role fenced to its schema |

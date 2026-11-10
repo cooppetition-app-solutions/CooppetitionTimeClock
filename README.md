@@ -53,6 +53,18 @@ Contracting, Vancouver, BC rules) with jobs, crews, three weeks of punches
 and an approved pay period. Pick any person on the sign-in page to see their
 role. Kiosk PINs are shown there too.
 
+The hosted version (Vercel) saves to a live Supabase database instead, so
+changes persist, and PINs are stored hashed and not shown. Demo kiosk PINs:
+
+| Person | Company | Role | PIN |
+| --- | --- | --- | --- |
+| Dana Reyes | Northline | Owner / Admin | 1001 |
+| Priya Shah | Northline | Office / Payroll | 1002 |
+| Marco Bianchi, Sam Okafor | Northline | Foreman | 2001, 2002 |
+| Tyler Chen, Aisha Mohamed, Ben Kowalski, Jordan Lee, Ravi Patel | Northline | Employee | 3001–3005 |
+| Claire Dubois / Hank Morrison | Ridgeview | Owner / Foreman | 1001 / 2001 |
+| Mei Tanaka, Oscar Silva | Ridgeview | Employee | 3001, 3002 |
+
 ```bash
 npm test
 ```
