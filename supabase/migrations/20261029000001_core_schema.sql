@@ -1,16 +1,19 @@
 -- TimeClock core schema (multi-tenant, white-label).
 --
 -- Target: Supabase Postgres, region ca-central-1 (Canada) for data residency.
--- Every tenant-owned row carries company_id, and Row Level Security (see the
+-- All objects live in the `timeclock` schema. Every tenant-owned row carries company_id, and Row Level Security (see the
 -- next migration) scopes every query to the caller's companies and role.
 --
 -- TypeScript mirror: src/lib/domain/types.ts. Naming: snake_case here,
 -- camelCase in TS (e.g. occurred_at ↔ occurredAt).
 
-create extension if not exists pgcrypto;
-create extension if not exists btree_gist;   -- no-overlap constraint on shifts
+create extension if not exists pgcrypto with schema extensions;
+create extension if not exists btree_gist with schema extensions;   -- no-overlap constraint on shifts
 
-create schema if not exists app;             -- helper functions, not exposed via the API
+-- Everything lives in its own schema, so the app can share a Supabase
+-- project with other apps without name clashes.
+create schema if not exists timeclock;
+set search_path = timeclock, extensions, public;
 
 -- ── Enums ────────────────────────────────────────────────────────────────
 
@@ -34,7 +37,7 @@ create type outbox_status        as enum ('pending', 'sending', 'sent', 'failed'
 create table companies (
   id                  uuid primary key default gen_random_uuid(),
   name                text not null,
-  slug                text not null unique check (slug ~ '^[a-z0-9-]{2,40}$'),   -- subdomain: <slug>.yourapp.com
+  slug                text not null unique check (slug ~ '^[a-z0-9-]{2,40}$'),   -- subdomain: <slug>.yourtimeclock.com
   custom_domain       text unique,                                               -- optional white-label domain
   -- branding (TS: Company.branding)
   app_name            text not null,
@@ -329,7 +332,7 @@ create table payroll_exports (
 -- ── Integrity triggers ───────────────────────────────────────────────────
 
 -- Punches: only voided/note may change after insert.
-create function app.punches_guard() returns trigger language plpgsql as $$
+create function timeclock.punches_guard() returns trigger language plpgsql as $$
 begin
   if (new.company_id, new.profile_id, new.job_id, new.type, new.occurred_at, new.source, new.created_by)
      is distinct from (old.company_id, old.profile_id, old.job_id, old.type, old.occurred_at, old.source, old.created_by) then
@@ -340,16 +343,16 @@ begin
   end if;
   return new;
 end $$;
-create trigger punches_guard before update on punches for each row execute function app.punches_guard();
+create trigger punches_guard before update on punches for each row execute function timeclock.punches_guard();
 
-create function app.append_only() returns trigger language plpgsql as $$
+create function timeclock.append_only() returns trigger language plpgsql as $$
 begin
   raise exception '% is append-only', tg_table_name;
 end $$;
-create trigger audit_log_append_only before update or delete on audit_log for each row execute function app.append_only();
+create trigger audit_log_append_only before update or delete on audit_log for each row execute function timeclock.append_only();
 
 -- Exported timesheets are locked.
-create function app.timesheets_guard() returns trigger language plpgsql as $$
+create function timeclock.timesheets_guard() returns trigger language plpgsql as $$
 begin
   if old.status = 'exported' and new.status <> 'exported' then
     raise exception 'exported timesheets are locked';
@@ -357,4 +360,4 @@ begin
   new.updated_at := now();
   return new;
 end $$;
-create trigger timesheets_guard before update on timesheets for each row execute function app.timesheets_guard();
+create trigger timesheets_guard before update on timesheets for each row execute function timeclock.timesheets_guard();

@@ -38,7 +38,7 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
                   <button className="card flex w-full items-center justify-between text-left hover:border-stone-400">
                     <span>
                       <span className="block font-semibold">{u.name}</span>
-                      <span className="text-xs text-stone-500">{ROLE_LABELS[u.role]} · kiosk PIN {u.kioskPin}</span>
+                      <span className="text-xs text-stone-500">{ROLE_LABELS[u.role]}{u.kioskPin ? ` · kiosk PIN ${u.kioskPin}` : ""}</span>
                     </span>
                     <span className="text-stone-400">→</span>
                   </button>

@@ -5,6 +5,8 @@
 
 begin;
 
+set local search_path = timeclock, extensions, public;
+
 -- Two tenants, one person of each role in tenant A, one employee in tenant B.
 insert into auth.users (id) values
   ('00000000-0000-0000-0000-0000000000a1'), ('00000000-0000-0000-0000-0000000000a2'),
@@ -47,6 +49,11 @@ insert into punches (company_id, profile_id, job_id, type, occurred_at, source, 
   ('10000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-0000000000a5', '30000000-0000-0000-0000-0000000000a2', 'in', now() - interval '1 hour', 'phone', '20000000-0000-0000-0000-0000000000a5'),
   ('10000000-0000-0000-0000-00000000000b', '20000000-0000-0000-0000-0000000000b1', '30000000-0000-0000-0000-0000000000b1', 'in', now() - interval '1 hour', 'phone', '20000000-0000-0000-0000-0000000000b1');
 
+insert into messages (id, company_id, sender_id, audience_type, audience_user_id, body) values
+  ('40000000-0000-0000-0000-0000000000a1', '10000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-0000000000a2', 'user', '20000000-0000-0000-0000-0000000000a4', 'Bring your harness');
+insert into message_deliveries (message_id, profile_id, channel, status) values
+  ('40000000-0000-0000-0000-0000000000a1', '20000000-0000-0000-0000-0000000000a4', 'in_app', 'delivered');
+
 create function pg_temp.as_user(uid text) returns void language plpgsql as $$
 begin
   perform set_config('request.jwt.claim.sub', uid, true);
@@ -63,6 +70,7 @@ end $$;
 select pg_temp.as_user('00000000-0000-0000-0000-0000000000a4');
 select pg_temp.check('employee sees only own punches', (select count(*) from punches) = 1);
 select pg_temp.check('employee sees one company', (select count(*) from companies) = 1);
+select pg_temp.check('recipient reads their message and delivery', (select count(*) from messages) = 1 and (select count(*) from message_deliveries) = 1);
 select pg_temp.check('employee cannot see other tenant jobs', not exists (select 1 from jobs where company_id = '10000000-0000-0000-0000-00000000000b'));
 do $$ declare n int; begin
   insert into punches (company_id, profile_id, job_id, type, occurred_at, source, created_by)
@@ -85,6 +93,7 @@ reset role;
 
 -- ── Foreman A ──
 select pg_temp.as_user('00000000-0000-0000-0000-0000000000a3');
+select pg_temp.check('non-recipient cannot read the message', (select count(*) from messages) = 0);
 select pg_temp.check('foreman sees crew punches on own job only', (select count(*) from punches where job_id = '30000000-0000-0000-0000-0000000000a1') >= 1 and not exists (select 1 from punches where job_id = '30000000-0000-0000-0000-0000000000a2'));
 do $$ declare n int; begin
   insert into punches (company_id, profile_id, job_id, type, occurred_at, source, created_by)
@@ -98,10 +107,10 @@ do $$ begin
   raise exception 'RLS TEST FAILED: foreman punched on a job they do not lead';
 exception when insufficient_privilege then raise notice 'ok  foreman cannot punch on other jobs';
 end $$;
-select public.set_site_modes('30000000-0000-0000-0000-0000000000a1', 'require_online', 'continuous');
+select timeclock.set_site_modes('30000000-0000-0000-0000-0000000000a1', 'require_online', 'continuous');
 select pg_temp.check('foreman can set site modes on own job', (select offline_mode = 'require_online' from jobs where id = '30000000-0000-0000-0000-0000000000a1'));
 do $$ begin
-  perform public.set_site_modes('30000000-0000-0000-0000-0000000000a2', 'require_online', 'continuous');
+  perform timeclock.set_site_modes('30000000-0000-0000-0000-0000000000a2', 'require_online', 'continuous');
   raise exception 'RLS TEST FAILED: foreman changed another site';
 exception when raise_exception then
   if sqlerrm like 'RLS TEST FAILED%' then raise; end if;
@@ -111,6 +120,7 @@ reset role;
 
 -- ── Office A ──
 select pg_temp.as_user('00000000-0000-0000-0000-0000000000a2');
+select pg_temp.check('sender sees the delivery and read state', (select count(*) from message_deliveries where message_id = '40000000-0000-0000-0000-0000000000a1') = 1);
 select pg_temp.check('office sees all company punches, no other tenant', (select count(*) from punches) >= 4 and not exists (select 1 from punches where company_id = '10000000-0000-0000-0000-00000000000b'));
 do $$ declare n int; begin
   update companies set name = 'x';
@@ -147,5 +157,17 @@ do $$ begin
   raise exception 'RLS TEST FAILED: double-booked a shift';
 exception when exclusion_violation then raise notice 'ok  overlapping shifts are rejected';
 end $$;
+
+-- ── Server role (used by the timeclock-db Edge Function) ──
+create table public.other_app_data (secret text);
+insert into public.other_app_data values ('not yours');
+set local role timeclock_app;
+select pg_temp.check('server role reads every timeclock tenant', (select count(distinct company_id) from punches) >= 2);
+do $$ begin
+  perform * from public.other_app_data;
+  raise exception 'RLS TEST FAILED: server role read another app''s table';
+exception when insufficient_privilege then raise notice 'ok  server role cannot read other apps in the project';
+end $$;
+reset role;
 
 rollback;
